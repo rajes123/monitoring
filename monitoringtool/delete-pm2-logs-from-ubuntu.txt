@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Load NVM (if using Node.js installed via NVM)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Delete all PM2 log files
+rm -rf /home/ubuntu/.pm2/logs/*
+
+# Restart all PM2 processes
+pm2 restart all
+
+
+
+
+0 12 * * * /bin/bash /home/ubuntu/clear_pm2_logs.sh >> /home/ubuntu/cron.log 2>&1
+
+
+
+
+sudo nano clear_pm2_logs.sh && sudo chmod -R 755 clear_pm2_logs.sh
+
+
+
+
+18.116.41.217
+
+
+
+
+sudo nano prometheus.sh && sudo chmod -R 755 prometheus.sh
+
+
+sudo nano node_exportor.sh && sudo chmod -R 755 node_exportor.sh
+
+
+sudo nano /etc/prometheus/prometheus.yml
+
+
+
+# Add Node Exporter job configuration
+  - job_name: "node_exporter"
+    static_configs:
+      - targets: ["localhost:9100"]
+        labels:
+          instance: "ubuntu-server"  # You can customize this name to identify your server
+
+
+
+
+sudo systemctl daemon-reload
+sudo systemctl restart prometheus
+sudo systemctl status prometheus

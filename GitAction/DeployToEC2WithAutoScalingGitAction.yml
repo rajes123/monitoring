@@ -1,0 +1,139 @@
+name: Backend Deploy to EC2 (Blue-Green Ready)
+
+on:
+  push:
+    branches:
+      - development
+
+jobs:
+  deploy:
+    name: Deploy Backend to EC2
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      ASG_NAME: ${{ secrets.DEV_AUTOSCALING_GROUP_NAME }}
+      INSTANCE_ID: ${{ secrets.DEV_INSTANCE_ID }}
+      LAUNCH_TEMPLATE_ID: ${{ secrets.DEV_LAUNCH_TEMPLATE_ID }}
+      AWS_REGION: us-east-1
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # -----------------------------
+      # Deploy Code to EC2
+      # -----------------------------
+      - name: Upload Code via SSH
+        uses: easingthemes/ssh-deploy@v2.1.5
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          REMOTE_HOST: ${{ secrets.HOST_DNS }}
+          REMOTE_USER: ${{ secrets.USERNAME }}
+          TARGET: ${{ secrets.TARGET_DIR }}
+
+      # -----------------------------
+      # Restart Application (PM2)
+      # -----------------------------
+      - name: Restart Backend Services
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST_DNS }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ec2-user/backend
+
+            echo "Installing dependencies..."
+            npm install
+
+            echo "Restarting backend..."
+            pm2 stop all || true
+            pm2 start ecosystem.config.js || pm2 restart all
+            pm2 save
+
+            echo "Handling cron jobs..."
+            cd cronjobs
+            npm install
+            pm2 restart cronjobs || pm2 start cronjobs
+
+      # -----------------------------
+      # AWS Auth
+      # -----------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+
+      # -----------------------------
+      # Stop Auto Scaling (Scale Down)
+      # -----------------------------
+      - name: Scale Down ASG
+        run: |
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name $ASG_NAME \
+            --min-size 0 --desired-capacity 0
+
+          echo "Waiting for instances to terminate..."
+          while true; do
+            count=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names $ASG_NAME \
+              --query 'AutoScalingGroups[0].Instances | length(@)' \
+              --output text)
+
+            [ "$count" -eq 0 ] && break
+            sleep 10
+          done
+
+      # -----------------------------
+      # Create AMI
+      # -----------------------------
+      - name: Create AMI
+        run: |
+          timestamp=$(date +"%Y%m%d-%H%M%S")
+          AMI_ID=$(aws ec2 create-image \
+            --instance-id $INSTANCE_ID \
+            --name "backend-ami-$timestamp" \
+            --query 'ImageId' --output text)
+
+          echo "AMI_ID=$AMI_ID" >> $GITHUB_ENV
+
+          echo "Waiting for AMI..."
+          aws ec2 wait image-available --image-ids $AMI_ID
+
+      # -----------------------------
+      # Update Launch Template
+      # -----------------------------
+      - name: Create Launch Template Version
+        run: |
+          aws ec2 create-launch-template-version \
+            --launch-template-id $LAUNCH_TEMPLATE_ID \
+            --source-version '$Latest' \
+            --launch-template-data "{\"ImageId\":\"$AMI_ID\"}"
+
+      - name: Set Default Launch Template Version
+        run: |
+          VERSION=$(aws ec2 describe-launch-template-versions \
+            --launch-template-id $LAUNCH_TEMPLATE_ID \
+            --query 'LaunchTemplateVersions[-1].VersionNumber' \
+            --output text)
+
+          aws ec2 modify-launch-template \
+            --launch-template-id $LAUNCH_TEMPLATE_ID \
+            --default-version $VERSION
+
+      # -----------------------------
+      # Scale Up ASG (New Instances)
+      # -----------------------------
+      - name: Scale Up ASG
+        run: |
+          aws autoscaling update-auto-scaling-group \
+            --auto-scaling-group-name $ASG_NAME \
+            --min-size 2 --desired-capacity 2
+
+          echo "Waiting for instances..."
+          sleep 30

@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-ingress
+  namespace: monitoring
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/whitelist-source-range: "18.116.41.217/32"  # 👈 Only allow your Grafana IP
+spec:
+  ingressClassName: nginx  # 👈 Add this line
+  rules:
+  - host: services-factoreld.drivehos.com
+    http:
+      paths:
+      - path: /prometheus(/|$)(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: kube-prom-stack-kube-prome-prometheus
+            port:
+              number: 9090

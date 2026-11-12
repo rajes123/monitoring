@@ -1,0 +1,48 @@
+Install Prometheus on EKS
+
+Step 1:
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+
+Step 2:
+helm repo update
+
+Step 3:
+helm install kube-prom-stack prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
+
+Step 4:
+kubectl apply -f .\prometheus-ingress.yaml
+
+Step 5:
+helm upgrade kube-prom-stack prometheus-community/kube-prometheus-stack -n monitoring -f alert-config.yaml
+
+Step 6:
+helm upgrade kube-prom-stack prometheus-community/kube-prometheus-stack -n monitoring -f alertmanager-values.yaml
+
+Step 7:
+kubectl get svc -n monitoring
+response: 
+NAME                                      TYPE           CLUSTER-IP       EXTERNAL-IP     PORT(S)
+kube-prom-stack-grafana                   ClusterIP      10.x.x.x         <none>          80/TCP
+kube-prom-stack-kube-state-metrics        ClusterIP      10.x.x.x         <none>          8080/TCP
+kube-prom-stack-prometheus                ClusterIP      10.x.x.x         <none>          9090/TCP
+
+Step 8:
+kubectl get svc -A | grep LoadBalancer
+
+
+kubectl patch svc kube-prom-stack-kube-prome-prometheus -n monitoring -p '{"spec": {"type": "LoadBalancer"}}'
+
+
+helm upgrade kube-prom-stack prometheus-community/kube-prometheus-stack --n monitoring --set prometheus.prometheusSpec.externalUrl=https://services-zeromaxeld.drivehos.com/prometheus
+
+
+helm install kube-prom-stack prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
+
+
+helm upgrade kube-prom-stack prometheus-community/kube-prometheus-stack -n monitoring -f alertmanager-values.yaml
+
+
+Install Promtail on EKS
+
+Step 1:
+kubectl apply -f .\promtail-implementation.yaml

@@ -1,0 +1,30 @@
+config:
+  clients:
+    - url: http://18.116.41.217:3100/loki/api/v1/push
+  
+daemonset:
+  volumeMounts:
+    - name: config
+      mountPath: /etc/promtail
+    - name: run
+      mountPath: /run/promtail
+    - name: containers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+    - name: pods
+      mountPath: /var/log/pods
+      readOnly: true
+
+  volumes:
+    - name: config
+      configMap:
+        name: promtail
+    - name: run
+      hostPath:
+        path: /run/promtail
+    - name: containers
+      hostPath:
+        path: /var/lib/docker/containers
+    - name: pods
+      hostPath:
+        path: /var/log/pods

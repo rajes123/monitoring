@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: default
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 3101
+      grpc_listen_port: 0
+
+    positions:
+      filename: /var/log/positions.yaml
+
+    clients:
+      - url: http://18.116.41.217:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Only get logs from lucideld-ingress namespace
+          - source_labels: [__meta_kubernetes_namespace]
+            regex: lucideld-ingress
+            action: keep
+
+          # Add namespace, pod, container, etc.
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_name]
+            separator: /
+            target_label: job
+            replacement: $1/$2
+            action: replace
+
+          # Add custom environment label (set manually per cluster)
+          - target_label: environment
+            replacement: lucideld-stage-log  # <-- Change this per cluster (dev, stage, prod)
+
+          # Optional: propagate labels from pod annotations
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+
+        pipeline_stages:
+          - docker: {}
+
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: kubernetes-pods
+              __path__: /var/log/containers/*.log

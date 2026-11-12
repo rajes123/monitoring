@@ -1,0 +1,12 @@
+aws_region = "ap-south-1"
+project_name = "microservices"
+environment = "dev"
+
+# Set this to your public IP with /32 for safer access, e.g. ["203.0.113.10/32"].
+# The default in variables.tf is open for initial lab convenience; change it.
+cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
+
+node_instance_types = ["t3.medium"]
+node_min_size       = 2
+node_desired_size   = 2
+node_max_size       = 4

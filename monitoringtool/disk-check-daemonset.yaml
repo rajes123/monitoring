@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: disk-check
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: disk-check
+  template:
+    metadata:
+      labels:
+        app: disk-check
+    spec:
+      containers:
+      - name: disk-check
+        image: busybox
+        command: ["sh", "-c", "while true; do df -h /; sleep 300; done"]
+        volumeMounts:
+        - name: root
+          mountPath: /host
+          readOnly: true
+      volumes:
+      - name: root
+        hostPath:
+          path: /
+      tolerations:
+      - operator: "Exists"

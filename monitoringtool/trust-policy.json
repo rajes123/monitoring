@@ -1,0 +1,20 @@
+cat <<EOF > trust-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::819346998991:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/882988BFE35DDD13CEA2898BC31A5302"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.us-east-2.amazonaws.com/id/882988BFE35DDD13CEA2898BC31A5302:sub": "system:serviceaccount:amazon-cloudwatch:cloudwatch-agent"
+        }
+      }
+    }
+  ]
+}
+EOF
+

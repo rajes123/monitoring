@@ -1,0 +1,298 @@
+name: micro deployment
+
+on:
+  push:
+    branches:
+      - prod/usfasteld
+
+jobs:
+  run-deployment-ohio:
+    runs-on: ubuntu-latest
+    name: Deploy on Ohio Region
+    strategy:
+      matrix:
+        mongodb-version: ['4.4.14']
+        
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 
+      - name: Print Branch Name
+        run: |
+          echo "Branch Name: $GITHUB_REF"
+
+      # login to aws first 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_ID_PROD_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_SECRET_PROD_KEY }}
+          aws-region: us-east-2
+
+      # checking the naming 
+      - name: checking and fetching the branch name
+        run: |
+          branch_name=${GITHUB_REF#refs/heads/}
+          echo "$branch_name"
+          if [[ "$branch_name" != */* ]]; then
+            echo "Invalid branch name format. Workflow canceled."
+            exit 1
+          fi
+
+          IFS='/' read -ra branch_parts <<< "$branch_name"
+          if [ "${#branch_parts[@]}" -ne 2 ]; then
+            echo "Invalid branch name format. Workflow canceled."
+            exit 1
+          fi
+
+          bucket_name="${branch_parts[0]}"
+          file_name="${branch_parts[1]}.json"
+          echo "bucketName=$bucket_name" >> $GITHUB_ENV
+          echo "fileName=$file_name" >> $GITHUB_ENV
+          echo "ENVIRONMENT_NAME=${branch_parts[0]}" >> $GITHUB_ENV
+          echo "WHITELABEL_NAME=${branch_parts[1]}" >> $GITHUB_ENV
+
+      - name: Set Patch for build update
+        run: |
+          echo "BUILD_VERSION_PATCH=patch" >> $GITHUB_ENV
+
+      # - name: Install jq
+      #   run: sudo apt-get update && sudo apt-get install -y jq
+                  
+      - name: Fetch JSON File from S3
+        run: |
+          ENVIRONMENT_NAME=${{ env.ENVIRONMENT_NAME }}
+          WHITELABEL_NAME=${{ env.WHITELABEL_NAME }}
+          aws s3 cp s3://whitelabel-env/${ENVIRONMENT_NAME}/${WHITELABEL_NAME}.json json_file.json
+           # Use jq to extract and display the values
+          jq .dbServer json_file.json
+          
+      - name: Parse JSON File
+        run: |
+          # Parse JSON and set environment variables 
+          echo "DB_URL=$(jq -r .dbServer json_file.json)" >> $GITHUB_ENV
+          
+      - name: Print Parsed Values
+        run: |
+          echo "dbName: $DB_URL"
+          echo "ENVIRONMENT_NAME : $ENVIRONMENT_NAME"
+          echo "BUILD_VERSION_PATCH : $BUILD_VERSION_PATCH"
+
+      - name: Make API Request
+        run: |
+          curl --location 'https://9gsg2eaj36.execute-api.us-east-2.amazonaws.com/dev/add-build-version' \
+            --header 'Content-Type: text/plain' \
+            --data-raw '{
+                "environment": "${{ env.ENVIRONMENT_NAME }}",
+                "DB_URL": "${{ env.DB_URL }}",
+                "buildType": "${{ env.BUILD_VERSION_PATCH }}"
+            }'
+
+      - name: Create EKS Cluster
+        run: |
+          CLUSTER_NAME="$ENVIRONMENT_NAME-$WHITELABEL_NAME"
+          REGION="us-east-2"
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> $GITHUB_ENV
+          if aws eks describe-cluster --name $CLUSTER_NAME --region $REGION &> /dev/null; then
+            echo "EKS Cluster $CLUSTER_NAME already exists."
+          else
+            aws eks --region $REGION create-cluster \
+              --name $CLUSTER_NAME \
+              --kubernetes-version 1.34 \
+              --role-arn arn:aws:iam::819346998991:role/aws-eks-cluster-role \
+              --resources-vpc-config subnetIds=subnet-0de22e9c5fa475b04,subnet-0e528af9e1f523696,subnet-01e98195d61a35c87 \
+              --region $REGION
+            aws eks --region $REGION wait cluster-active --name $CLUSTER_NAME
+          fi
+   
+
+      - name: Create the nodegroup for the new cluster
+        run: |
+          NODEGROUP_NAME="${{ env.CLUSTER_NAME }}-nodegroup"
+          region="us-east-2"
+          if aws eks describe-nodegroup --cluster-name ${{ env.CLUSTER_NAME }} --nodegroup-name $NODEGROUP_NAME --region $region &> /dev/null; then
+            echo "EKS Nodegroup $nodegroup_name already exists."
+          else
+          aws eks create-nodegroup \
+            --region $region \
+            --cluster-name ${{ env.CLUSTER_NAME }} \
+            --nodegroup-name $NODEGROUP_NAME \
+            --subnets subnet-0de22e9c5fa475b04 subnet-0e528af9e1f523696 subnet-01e98195d61a35c87 \
+            --instance-types r6a.2xlarge \
+            --disk-size 150 \
+            --node-role arn:aws:iam::819346998991:role/AWSEKSNodeWorkerRole \
+            --scaling-config minSize=2,maxSize=10,desiredSize=2
+          aws eks wait nodegroup-active \
+            --region us-east-2 \
+            --cluster-name ${{ env.CLUSTER_NAME }} \
+            --nodegroup-name $NODEGROUP_NAME
+          fi
+
+      
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v36
+      
+      - name: List all changed files
+        id: get-changed-folderName
+        run: |
+          # declare an empty array 
+          folders_changed=()
+
+          # function to check if a value exists in array or not also it will not push .github too
+          value_exists() {
+            local value=$1
+            if [[ "$value" == ".github" || "$value" == "ingress-runner.yaml" || "$value" == "common" || "$value" == ".gitignore" || "$value" == "environment" || "$value" == "firebase" || "$value" == "ingress-installer.yaml" || "$value" == "update-env.js" || "$value" == "package-lock.json" ]]; then
+              return 0
+            fi
+            
+            for element in "${folders_changed[@]}"; do
+              if [[ "$element" == "$value" ]]; then
+                return 0
+              fi
+            done
+            
+            return 1
+          }
+
+          # Push a value into the array if it doesn't already exist
+          push_unique_value() {
+            local value=$1
+            if ! value_exists "$value"; then
+              folders_changed+=("$value")
+            fi
+          }
+          # getting the value of the files changed and pushing it in the array
+          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+            string="$file"
+            IFS="/" read -ra parts <<< "$string"
+            substring="${parts[0]}"
+            push_unique_value $substring
+          done
+          echo "${folders_changed[@]}"
+
+          # setting the output of this step as folders_changed array 
+          echo "FOLDERS_MODIFIED=${folders_changed[@]}" >> $GITHUB_ENV
+          
+      - name: Install yq
+        run: |
+          # Create a directory for yq
+          mkdir -p $HOME/bin
+
+          # Install yq (jq for YAML) in the user's bin directory
+          wget https://github.com/mikefarah/yq/releases/download/3.4.1/yq_linux_amd64 -O $HOME/bin/yq
+          chmod +x $HOME/bin/yq
+
+          # Add the user's bin directory to the PATH
+          echo "export PATH=$HOME/bin:$PATH" >> $HOME/.bashrc
+          source $HOME/.bashrc 
+
+      # getting the kubeconfig for the deployment 
+      - name: Get the kubeconfig for the newly created cluster
+        run: |
+          KUBECONFIG_FILE_PATH="./kubeconfig.yaml"
+          aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region us-east-2 --kubeconfig $KUBECONFIG_FILE_PATH
+          echo "KUBECONFIG_FILE=$KUBECONFIG_FILE_PATH" >> $GITHUB_ENV
+          
+      - name: List directory contents
+        run: |
+          ls -R
+      
+      - name: Read kubeconfig file and save as string
+        run: |
+          KUBECONFIG_CONTENT_LOCAL=$(cat ./kubeconfig.yaml | base64 -w0)
+          echo "KUBECONFIG_CONTENT=$KUBECONFIG_CONTENT_LOCAL" >> $GITHUB_ENV
+
+      # configuring new type of kubectl configuration
+      - uses: tale/kubectl-action@v1
+        with:
+          base64-kube-config: ${{ env.KUBECONFIG_CONTENT }}
+        
+      - name: make build for modified services and push to ecr
+        run: |
+          # getting the value of changed directories
+          # echo ${{ env.FOLDERS_MODIFIED }}
+          # FOLDERS=${{ env.FOLDERS_MODIFIED }}
+          FOLDERS=$FOLDERS_MODIFIED
+          echo "gpt method ------- $FOLDERS"
+          # splitting through the above string
+          IFS=" " read -ra FOLDERS_ARRAY <<< "$FOLDERS"
+          # loop through the new array folders_array
+          for folder in ${FOLDERS_ARRAY[@]}; do
+            # echo "Processing folder: $folder"
+            # folder="billing"
+            # Log in to the ECR repository
+            aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 819346998991.dkr.ecr.us-east-2.amazonaws.com
+            
+            # --------------------------------- CREATING AND PUSHING THE DOCKER IMAGE IN THE ECR REPOSITORY --------------------------------
+            REPOSITORY_NAME="$folder-$WHITELABEL_NAME-$bucketName" 
+            if ! aws ecr describe-repositories --repository-names $REPOSITORY_NAME; then
+              aws ecr create-repository --repository-name $REPOSITORY_NAME
+            else
+              echo "Repository $REPOSITORY_NAME already exists. Skipping creation."
+            fi
+          # --------------------------------- CREATING AND PUSHING THE DOCKER IMAGE IN THE ECR REPOSITORY ----------------------------------
+
+            # getting the latest image of the code
+            EXISTING_LATEST_BUILD_VERSION=$(aws ecr describe-images --repository-name $REPOSITORY_NAME --region us-east-2 --query 'reverse(sort_by(imageDetails,& imagePushedAt))[0].imageTags[0]' --output text)
+            
+            # function to increment the existing build version
+            increment_build_version () {
+              local version=$1
+              # Split the current version into components
+              IFS='.' read -ra VERSION_ARRAY <<< "$version"
+              local major=${VERSION_ARRAY[0]}
+              local minor=${VERSION_ARRAY[1]}
+              local patch=${VERSION_ARRAY[2]}
+              # Increment the version components
+              patch=$((patch + 1))
+              if [[ $patch -eq 100 ]]; then
+                minor=$((minor + 1))
+                patch=0
+              fi
+              if [[ $minor -eq 100 ]]; then
+                major=$((major + 1))
+                minor=0
+              fi
+              # Create the new version string
+              local new_version="$major.$minor.$patch"
+              echo "$new_version"
+            }
+            echo "current response from ecr ---- $EXISTING_LATEST_BUILD_VERSION"
+            if [[ "$EXISTING_LATEST_BUILD_VERSION" == "None" ]]; then
+              LATEST_BUILD_VERSION="1.0.0"
+            else
+              LATEST_BUILD_VERSION=$(increment_build_version "$EXISTING_LATEST_BUILD_VERSION")
+            fi
+            
+            echo "new buld version ------- $LATEST_BUILD_VERSION"
+            
+            # build docker image using the docker  file for the concerned folder
+            docker build -t $REPOSITORY_NAME:$LATEST_BUILD_VERSION -f $folder/Dockerfile --build-arg NPM_TOKEN=${{ secrets.NPM_TOKEN }} .
+            # Tag the Docker image with the ECR repository URL
+            ECR_REPO_URL="819346998991.dkr.ecr.us-east-2.amazonaws.com/$REPOSITORY_NAME"
+            docker tag $REPOSITORY_NAME:$LATEST_BUILD_VERSION $ECR_REPO_URL:$LATEST_BUILD_VERSION
+            # Push the Docker image to ECR
+            docker push $ECR_REPO_URL:$LATEST_BUILD_VERSION
+            
+            # update the kubectl deployment manifest to run the deployment file for each service in question
+            NEW_IMAGE_URL=$ECR_REPO_URL:$LATEST_BUILD_VERSION
+            DEPLOYMENT_FILE="$folder/deployment.yaml"
+            sed -i "s~{{IMAGE_URL}}~$NEW_IMAGE_URL~" $DEPLOYMENT_FILE
+            sed -i "s~{{PROJECT}}~$WHITELABEL_NAME~" $DEPLOYMENT_FILE
+            sed -i "s~{{AWS_ACCESS_KEY}}~${{ secrets.AWS_ACCESS_ID_PROD_KEY }}~" $DEPLOYMENT_FILE
+            sed -i "s~{{AWS_SECRET_KEY}}~${{ secrets.AWS_ACCESS_SECRET_PROD_KEY }}~" $DEPLOYMENT_FILE
+            sed -i "s~{{ENVIRONMENT_NAME}}~$ENVIRONMENT_NAME~" $DEPLOYMENT_FILE
+            kubectl apply -f $DEPLOYMENT_FILE
+          done
+
+      - name: run the ingress runner
+        run: |
+          INGRESS_RUNNER_FILE="ingress-runner.yaml"
+          sed -i "s~{{PROJECT}}~$WHITELABEL_NAME~" $INGRESS_RUNNER_FILE
+          sed -i "s~{{ENVIRONMENT_NAME}}~$ENVIRONMENT_NAME~" $INGRESS_RUNNER_FILE
+          kubectl apply -f ingress-runner.yaml
+          # kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+          # kubectl create serviceaccount -n kubernetes-dashboard admin-user
+          # kubectl apply -f https://reseller-environment.s3.us-east-2.amazonaws.com/admin-user.yaml
